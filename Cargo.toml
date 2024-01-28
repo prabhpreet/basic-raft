@@ -1,0 +1,22 @@
+[package]
+name = "raft"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+actix = "0.13.1"
+async-recursion = "1.0.5"
+env_logger = "0.11.1"
+log = "0.4.20"
+postcard = {version="1.0.8", features=["alloc"]}
+rand = "0.8.5"
+serde = {version ="1.0.195",features=["derive"]}
+serde_json = "1.0.111"
+socket2 = "0.5.5"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+procspawn = "1.0.0"
+

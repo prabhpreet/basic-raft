@@ -11,9 +11,9 @@ use async_recursion::async_recursion;
 
 pub(super) async fn state_handle(
     mut server_state: ServerState,
-    change_sender: mpsc::Sender<StateChange>,
     mut change_receiver: mpsc::Receiver<StateChange>,
     bus_sender: NodeSender,
+    mut election_timer: crate::server::timeout::ElectionTimer,
 ) {
     #[async_recursion]
     async fn evaluate_change(server_state: &mut ServerState, bus_sender: &NodeSender) {
@@ -28,16 +28,21 @@ pub(super) async fn state_handle(
         }
     }
 
-    debug!("{:?}: Starting state handle", server_state.node);
+    debug!("{:?},{:?}: Starting state handle", server_state.server_vars.current_term, server_state.node);
+    election_timer.update_state(&server_state);
     loop {
         let change = change_receiver.recv().await;
         if change.is_none() {
             break;
         }
 
-        match change.unwrap() {
-            StateChange::Timeout => {
-                if super::timeout::timeout(&mut server_state) {
+        let change = change.unwrap();
+
+        debug!("{:?},{:?}: Received state change {:?}", server_state.server_vars.current_term, server_state.node, change);
+
+        match change {
+            StateChange::ElectionTimeout => {
+                if super::timeout::election_timeout(&mut server_state) {
                     evaluate_change(&mut server_state, &bus_sender).await;
                 }
             }
@@ -47,15 +52,16 @@ pub(super) async fn state_handle(
                 }
             }
             StateChange::Receive((message_src, message)) => {
-                if super::receive::receive(&mut server_state, message_src, message, &bus_sender)
+                if super::receive::receive(&mut server_state, message_src, message, &bus_sender, &mut election_timer)
                     .await
                 {
                     evaluate_change(&mut server_state, &bus_sender).await;
                 }
             }
         }
+        election_timer.update_state(&server_state);
     }
-    error!("{:?}: Exited state change thread", server_state.node);
+    error!("{:?},{:?}: Exited state change thread", server_state.server_vars.current_term, server_state.node);
 }
 
 /*
@@ -73,7 +79,7 @@ RequestVote(i, j) ==
  */
 
 async fn request_vote(server_state: &mut ServerState, bus_sender: &NodeSender) -> bool {
-    debug!("{:?}: Requesting vote", server_state.node);
+    debug!("{:?},{:?}: Requesting vote", server_state.server_vars.current_term, server_state.node);
     match &mut server_state.server_vars.state {
         State::Candidate(candidate_vars) => {
             for server in &server_state.all_servers {
@@ -127,7 +133,8 @@ fn become_leader(server_state: &mut ServerState) -> bool {
         State::Candidate(candidate_vars) => {
             if candidate_vars.votes_granted.len() > server_state.all_servers.len() / 2 {
                 debug!(
-                    "{:?}: Becoming leader- votes {:?}/{:?}",
+                    "{:?},{:?}: Becoming leader- votes {:?}/{:?}",
+                    server_state.server_vars.current_term,
                     server_state.node,
                     candidate_vars.votes_granted.len(),
                     server_state.all_servers.len()
@@ -153,7 +160,8 @@ fn become_leader(server_state: &mut ServerState) -> bool {
                 true
             } else {
                 debug!(
-                    "{:?}: Not becoming leader- votes {:?}/{:?}",
+                    "{:?},{:?}: Not becoming leader- votes {:?}/{:?}",
+                    server_state.server_vars.current_term,
                     server_state.node,
                     candidate_vars.votes_granted.len(),
                     server_state.all_servers.len()
@@ -163,7 +171,8 @@ fn become_leader(server_state: &mut ServerState) -> bool {
         }
         _ => {
             debug!(
-                "{:?}: Not becoming leader- not candidate",
+                "{:?},{:?}: Not becoming leader- not candidate",
+                server_state.server_vars.current_term,
                 server_state.node
             );
             false
@@ -217,7 +226,7 @@ fn advance_commit_index(server_state: &mut ServerState) -> bool {
                 });
 
             if let Some(max_index) = max_index {
-                debug!("{:?}: Advancing commit index", server_state.node);
+                debug!("{:?},{:?}: Advancing commit index", server_state.server_vars.current_term ,server_state.node);
                 let max_entry = server_state.log_vars.log.get(max_index as usize).unwrap();
                 if max_entry.term == server_state.server_vars.current_term {
                     server_state.log_vars.commit_index = LogIndex(max_index);
@@ -226,13 +235,16 @@ fn advance_commit_index(server_state: &mut ServerState) -> bool {
                     false
                 }
             } else {
-                debug!("{:?}: Not advancing commit index", server_state.node);
+                debug!("{:?},{:?}: Not advancing commit index", 
+                server_state.server_vars.current_term ,
+                server_state.node);
                 false
             }
         }
         _ => {
             debug!(
-                "{:?}: Not advancing commit index- not leader",
+                "{:?},{:?}: Not advancing commit index- not leader",
+                server_state.server_vars.current_term,
                 server_state.node
             );
             false
@@ -299,7 +311,8 @@ async fn append_entries(server_state: &mut ServerState, bus_sender: &NodeSender)
                     std::cmp::min(server_state.log_vars.commit_index.0, last_entry as uindex);
 
                 debug!(
-                    "{:?}: Appending entries to {:?}, len {:?}",
+                    "{:?},{:?}: Appending entries to {:?}, len {:?}",
+                    server_state.server_vars.current_term,
                     server_state.node,
                     server,
                     entries.len()
@@ -324,7 +337,9 @@ async fn append_entries(server_state: &mut ServerState, bus_sender: &NodeSender)
             false
         }
         _ => {
-            debug!("{:?}: Not appending entries- not leader", server_state.node);
+            debug!("{:?},{:?}: Not appending entries- not leader", 
+            server_state.server_vars.current_term,
+            server_state.node);
             false
         }
     }

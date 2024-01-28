@@ -13,7 +13,7 @@ pub(super) async fn receive_handle(
     while let Some((id, message)) = bus_receiver.recv().await {
         //Send a state using change sender
         debug!("Received message from node: {:?}", id);
-        if let Ok(_) = change_sender
+        if let Ok(()) = change_sender
             .send(super::StateChange::Receive((id, message)))
             .await
         {
@@ -85,6 +85,7 @@ pub(super) async fn receive(
     message_src: ServerID,
     message: crate::protocol::Message,
     bus_sender: &NodeSender,
+    election_timer: &mut super::ElectionTimer,
 ) -> bool {
     let message_term = message.term;
     //Update term
@@ -119,6 +120,7 @@ pub(super) async fn receive(
                 request,
                 message_term,
                 bus_sender,
+                election_timer
             )
             .await
         }
@@ -318,7 +320,9 @@ async fn handle_append_entries_request(
     message: crate::protocol::AppendEntriesRequest,
     message_term: Term,
     bus_sender: &NodeSender,
+    election_timer: &mut super::ElectionTimer
 ) -> bool {
+    election_timer.restart_timer(server_state);
     if message_term > server_state.server_vars.current_term {
         return false;
     }

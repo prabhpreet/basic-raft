@@ -76,9 +76,9 @@ impl NodeBus for TokioMulticastUdpBus {
                     //Check if message is for this node
                     match message_envelope.mdest {
                         MsgAddr::Node(n) if n == node => {
-                            debug!(
-                                "Receiving message to node: {:?} from {:?}",
-                                node, message_envelope.msource
+                            trace!(
+                                "Receiving message to node: {:?} from {:?}: {:?}",
+                                node, message_envelope.msource, message_envelope.mtype
                             );
                             receiver_tx.send((message_envelope.msource , message_envelope.mtype)).await.unwrap();
                             debug!(
@@ -120,7 +120,7 @@ impl NodeBus for TokioMulticastUdpBus {
 
                 //Serialize and send message on UDP port
                 let message_serialized = postcard::to_allocvec(&message_envelope).unwrap();
-                trace!("Sending message to node");
+                debug!("Sending message to node {:?}", message_envelope);
 
                 tx_socket
                     .send_to(&message_serialized, sock_addr)

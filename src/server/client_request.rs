@@ -43,7 +43,7 @@ pub(super) async fn client_request_loop(
 ) {
     loop {
         if let Ok(value) =
-            tokio::time::timeout(Duration::from_millis(100), client_receiver.recv()).await
+            tokio::time::timeout(Duration::from_millis(1000), client_receiver.recv()).await
         {
             match value {
                 Some(value) => {
@@ -56,7 +56,7 @@ pub(super) async fn client_request_loop(
                 }
             }
         } else {
-            cs.send(StateChange::Timeout).await.unwrap();
+            //cs.send(StateChange::ClientRequest(LogCommand::Heartbeat)).await.unwrap();
         }
     }
 }

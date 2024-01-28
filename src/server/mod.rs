@@ -13,7 +13,7 @@ use tokio::sync::mpsc::{self, Receiver, Sender};
 
 use self::client_request::client_request_loop;
 use self::state_handle::state_handle;
-use self::timeout::timeout_loop;
+use self::timeout::ElectionTimer;
 
 pub struct ServerInit {
     pub node: ServerID,
@@ -100,13 +100,12 @@ pub struct Server {
     bus_receiver_handle: tokio::task::JoinHandle<()>,
     state_handle: tokio::task::JoinHandle<()>,
     client_handle: tokio::task::JoinHandle<()>,
-    timeout_handle: tokio::task::JoinHandle<()>,
     client_channel: mpsc::Sender<String>,
 }
 
 #[derive(Debug, PartialEq, Clone)]
 enum StateChange {
-    Timeout,
+    ElectionTimeout,
     ClientRequest(LogCommand),
     Receive((ServerID,Message))
 }
@@ -146,10 +145,12 @@ impl Server {
 
         let mut bus = config.bus;
         let (bus_sender, bus_receiver) = bus.register();
-        let change_handle = tokio::spawn(state_handle(server_state, change_sender.clone(), change_receiver, bus_sender));
-
         let bus_receiver_handle = tokio::spawn(receive::receive_handle( bus_receiver, change_sender.clone()));
-        let timeout_handle = tokio::spawn(timeout_loop(change_sender.clone()));
+
+        let timer = ElectionTimer::new(change_sender.clone());
+
+        let change_handle = tokio::spawn(state_handle(server_state, change_receiver, bus_sender, timer));
+
 
         Server {
             node: config.node,
@@ -158,7 +159,6 @@ impl Server {
             bus_receiver_handle,
             state_handle: change_handle,
             client_handle,
-            timeout_handle,
             client_channel,
         }
     }
@@ -174,48 +174,65 @@ impl Drop for Server {
         debug!("Dropping server {:?}", self.node);
         self.state_handle.abort();
         self.client_handle.abort();
-        self.timeout_handle.abort();
         self.bus_receiver_handle.abort();
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{env, thread::sleep, time::Duration};
+    use std::{thread::sleep, time::Duration};
 
     use log::debug;
 
     use super::*;
-    use crate::{bus::TokioMulticastUdpBus, types::uindex};
+    use crate::bus::TokioMulticastUdpBus;
 
     fn init() {
-        let _ = env_logger::builder().is_test(true).try_init();
+        let _ = env_logger::builder()
+        //Format timestamp to include milliseconds
+        .format_timestamp(Some(env_logger::TimestampPrecision::Millis))
+        .is_test(true).try_init();
+        procspawn::init();
     }
-    #[tokio::test]
-    async fn server() {
+    #[test]
+    fn server() {
         init();
+
+        sleep(Duration::from_secs(10));
     
         debug!("Starting server");
         let server_ids = vec![ServerID(1), ServerID(2), ServerID(3), ServerID(4)];
-        let mut servers = vec![];
-        for (index,server) in server_ids.iter().enumerate() {
-            let bus = Box::new(TokioMulticastUdpBus::new(
-                "224.0.0.2:3000".parse().unwrap(),
-                ServerID(index as uindex),
-            ));
-            let server = Server::new(ServerInit {
-                node: ServerID(index as uindex),
-                all_servers: server_ids.clone(),
-                bus: bus,
-                current_term: Term(0),
-                voted_for: None,
-                log: vec![],
+        let mut server_handles = vec![];
+        for server_id in server_ids.iter() {
+            let handle = procspawn::spawn((server_id.clone(), server_ids.clone()), |(server_id, server_ids): (ServerID, Vec<ServerID>)| {
+                //Tokio runtime create
+                let rt = tokio::runtime::Runtime::new().unwrap();
+    
+                rt.block_on(async {
+                    let bus = Box::new(TokioMulticastUdpBus::new(
+                        "224.0.0.2:3000".parse().unwrap(),
+                        server_id
+                    ));
+                    let server = Server::new(ServerInit {
+                        node: server_id,
+                        all_servers: server_ids.clone(),
+                        bus: bus,
+                        current_term: Term(0),
+                        voted_for: None,
+                        log: vec![],
+                    });
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        debug!("Server {:?} alive",server.node);
+                    }
+                });
             });
-            servers.push(server);
+            server_handles.push(handle);
         }
-
-        tokio::time::sleep(Duration::from_secs(100)).await;
-        drop(servers);
+        loop {
+            sleep(Duration::from_secs(10));
+            debug!("Processes heartbeat");
+        }
 
     }
 }

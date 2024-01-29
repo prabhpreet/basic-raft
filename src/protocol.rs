@@ -3,11 +3,19 @@ use tokio::sync::mpsc;
 use crate::types::{Term, LogEntry, LogIndex, ServerID, uindex};
 
 pub type NodeSender = mpsc::Sender<(MsgAddr, Message)>;
+pub type NodeSenderReciever = mpsc::Receiver<(MsgAddr, Message)>;
+
 pub type NodeReceiver = mpsc::Receiver<(ServerID,Message)>;
+pub type NodeReceiverSender = mpsc::Sender<(ServerID,Message)>;
+
+use tokio::sync::Mutex;
+use std::sync::Arc;
 
 pub trait NodeBus {
-    fn register(&mut self) -> (NodeSender, NodeReceiver);
+    fn register(&mut self) -> (NodeSender, NodeBusRxSender, Vec<tokio::task::JoinHandle<()>>);
 }
+
+pub type NodeBusRxSender = Arc<Mutex<Option<NodeReceiverSender>>>;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum MsgAddr {

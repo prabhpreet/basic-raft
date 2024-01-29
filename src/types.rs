@@ -11,9 +11,7 @@ pub struct ServerID(pub uindex);
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct ServerConfig {
     pub node: ServerID,
-    pub servers: Vec<ServerID>,
-    pub sock_addr: SocketAddr,
-    pub permanent_storage_path: String,
+    pub all_servers: Vec<ServerID>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq, Clone, Copy, PartialOrd, Ord)]

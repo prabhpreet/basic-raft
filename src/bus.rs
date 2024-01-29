@@ -1,15 +1,14 @@
-use crate::protocol::{Message, MessageEnvelope, MsgAddr, NodeBus};
+use crate::protocol::{MessageEnvelope, MsgAddr, NodeBus, NodeBusRxSender, NodeSender};
 use crate::types::ServerID;
-use log::{debug,trace};
+use log::{debug, trace,error};
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
 pub struct TokioMulticastUdpBus {
     sock_addr: std::net::SocketAddr,
     socket: Arc<tokio::net::UdpSocket>,
     node: ServerID,
-    tasks: Option<(JoinHandle<()>, JoinHandle<()>)>,
 }
 
 impl TokioMulticastUdpBus {
@@ -49,61 +48,19 @@ impl TokioMulticastUdpBus {
             sock_addr,
             socket,
             node,
-            tasks: None,
         }
     }
 }
 
 impl NodeBus for TokioMulticastUdpBus {
-    fn register(&mut self) -> (mpsc::Sender<(MsgAddr, Message)>, mpsc::Receiver<(ServerID,Message)>) {
+    fn register(
+        &mut self,
+    ) -> (NodeSender, NodeBusRxSender, Vec<JoinHandle<()>>)
+     {
         //Create channels for sending and receiving messages
         let (sender_tx, mut sender_rx) = mpsc::channel(32);
-        let (receiver_tx, receiver_rx) = mpsc::channel(32);
 
-        let rx_socket = self.socket.clone();
         let tx_socket = self.socket.clone();
-
-        let node = self.node.clone();
-        //Reciever task
-        let rx_task = tokio::spawn(async move {
-            let mut buf = [0; 1024];
-            trace!("Starting receiver task");
-            while let Ok((size, _)) = rx_socket.recv_from(&mut buf).await {
-                trace!("Received message");
-                //Parse message envelope
-                if let Ok(message_envelope) = postcard::from_bytes::<MessageEnvelope>(&buf[0..size])
-                {
-                    //Check if message is for this node
-                    match message_envelope.mdest {
-                        MsgAddr::Node(n) if n == node => {
-                            trace!(
-                                "Receiving message to node: {:?} from {:?}: {:?}",
-                                node, message_envelope.msource, message_envelope.mtype
-                            );
-                            receiver_tx.send((message_envelope.msource , message_envelope.mtype)).await.unwrap();
-                            debug!(
-                                "Received message to node: {:?} from {:?}",
-                                node, message_envelope.msource
-                            );
-                        }
-                        MsgAddr::AllNodes => {
-                            trace!(
-                                "Receiving message from node: {:?}",
-                                message_envelope.msource
-                            );
-                            receiver_tx.send((message_envelope.msource, message_envelope.mtype)).await.unwrap();
-                            trace!("Received message from node: {:?}", node);
-                        }
-                        _ => {
-                            trace!(
-                                "Node: {:?}, Message not for this node: {:?}",
-                                node, message_envelope
-                            );
-                        }
-                    }
-                }
-            }
-        });
 
         let node = self.node.clone();
         let sock_addr = self.sock_addr.clone();
@@ -129,34 +86,104 @@ impl NodeBus for TokioMulticastUdpBus {
             }
         });
 
-        self.tasks = Some((rx_task, tx_task));
+        let rx_socket = self.socket.clone();
+        let node = self.node.clone();
 
-        (sender_tx, receiver_rx)
+        let node_bus_rx_sender: NodeBusRxSender = Arc::new(Mutex::new(None));
+        let node_bus_rx_sender_return = node_bus_rx_sender.clone();
+
+        //Reciever task
+        let rx_task = tokio::spawn(async move {
+            debug!("Starting receiver task");
+
+            //Wait for node_bus_rx_sender
+            let receiver_tx = loop {
+                let value = node_bus_rx_sender.lock().await;
+                if value.is_none() {
+                    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+                }
+                else {
+                    break value.clone().unwrap();
+                }
+            };
+
+            debug!("Acquired sender");
+            let mut buf = [0; 1024];
+            while let Ok((size, _)) = rx_socket.recv_from(&mut buf).await {
+                trace!("Received message");
+                //Parse message envelope
+                if let Ok(message_envelope) = postcard::from_bytes::<MessageEnvelope>(&buf[0..size])
+                {
+                    //Check if message is for this node
+                    match message_envelope.mdest {
+                        MsgAddr::Node(n) if n == node => {
+                            trace!(
+                                "Receiving message to node: {:?} from {:?}: {:?}",
+                                node,
+                                message_envelope.msource,
+                                message_envelope.mtype
+                            );
+                            if let Err(_) = receiver_tx
+                                .send((message_envelope.msource, message_envelope.mtype))
+                                .await
+                            {
+                                error!("Error recieving message on node {:?} from {:?}", node, message_envelope.msource);
+                            } else {
+                                debug!(
+                                    "Received message to node: {:?} from {:?}",
+                                    node, message_envelope.msource
+                                );
+                            }
+                        }
+                        MsgAddr::AllNodes => {
+                            trace!(
+                                "Receiving message from node: {:?}",
+                                message_envelope.msource
+                            );
+                            if let Err(_) = receiver_tx
+                                .send((message_envelope.msource, message_envelope.mtype))
+                                .await
+                            {
+                                error!("Error recieving message on node {:?} from {:?}", node, message_envelope.msource);
+                            }
+                            trace!("Received message from node: {:?}", node);
+                        }
+                        _ => {
+                            trace!(
+                                "Node: {:?}, Message not for this node: {:?}",
+                                node,
+                                message_envelope
+                            );
+                        }
+                    }
+                }
+            }
+        });
+
+
+        let tasks = vec![tx_task, rx_task];
+
+        (sender_tx,node_bus_rx_sender_return , tasks)
     }
 }
 
-impl Drop for TokioMulticastUdpBus {
-    fn drop(&mut self) {
-        if let Some((rx_task, tx_task)) = self.tasks.take() {
-            rx_task.abort();
-            tx_task.abort();
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use std::{env, time::Duration};
 
     use super::*;
-    use crate::{protocol::{Message, MsgAddr, Test}, types::Term};
+    use crate::{
+        protocol::{Message, MsgAddr, Test},
+        types::Term,
+    };
     #[test]
     fn test_udp_bus() {
         //Procspawn init
         procspawn::init();
-        let test_message = Message{
-        term: Term(0),
-        payload: crate::protocol::MessagePayload::Test(Test{}),
+        let test_message = Message {
+            term: Term(0),
+            payload: crate::protocol::MessagePayload::Test(Test {}),
         };
 
         //Create node processes
@@ -168,10 +195,12 @@ mod tests {
             let handle = rt.block_on(async {
                 let node2 = ServerID(2);
                 let mut bus2 = TokioMulticastUdpBus::new("224.0.0.1:3000".parse().unwrap(), node2);
-                let (_tx2, mut rx2) = bus2.register();
+                let (rxtx2,mut rx2) = mpsc::channel(32);
+                let (_,sender_mutex,tasks) = bus2.register();
+                sender_mutex.lock().await.replace(rxtx2);
 
                 trace!("Running listen");
-                while let Some((id,message)) = rx2.recv().await {
+                while let Some((id, message)) = rx2.recv().await {
                     trace!("Something received");
                     if message == test_message {
                         trace!("Message received");
@@ -180,12 +209,14 @@ mod tests {
                         return Err(());
                     }
                 }
-                trace!("Error");
+                for task in tasks {
+                    task.abort();
+                }
                 drop(bus2);
                 Err(())
             });
 
-            handle.unwrap();
+            
 
             rt.shutdown_background();
         });
@@ -199,13 +230,17 @@ mod tests {
                 let node2 = ServerID(2);
 
                 let mut bus1 = TokioMulticastUdpBus::new("224.0.0.1:3000".parse().unwrap(), node1);
-                let (tx1, _rx1) = bus1.register();
+                let (tx1,_,tasks) = bus1.register();
 
                 tx1.send((MsgAddr::Node(node2), test_message))
                     .await
                     .unwrap();
 
                 tokio::time::sleep(Duration::from_secs(5)).await;
+
+                for task in tasks {
+                    task.abort();
+                }
 
                 drop(bus1);
             });

@@ -1,25 +1,31 @@
+use std::time::Duration;
+
 use log::debug;
+use tokio::sync::mpsc;
 
 use crate::{
-    protocol::{Message, MsgAddr, NodeReceiver, NodeSender, RequestVoteResponse},
-    types::{uindex, LogIndex, ServerID, Term},
+    bus, protocol::{Message, MsgAddr, NodeBus, NodeBusRxSender, NodeReceiver, NodeSender, RequestVoteResponse}, types::{uindex, LogIndex, ServerID, Term}
 };
 
 pub(super) async fn receive_handle(
-    mut bus_receiver: NodeReceiver,
+    rx_sender_mutex: NodeBusRxSender,
     change_sender: tokio::sync::mpsc::Sender<super::StateChange>,
+    node: ServerID,
 ) {
-    debug!("Starting receive handle");
+    debug!("{:?}- Starting receive handle", node);
+    let (bus_sender, mut bus_receiver) = mpsc::channel(5000);
+    rx_sender_mutex.lock().await.replace(bus_sender);
+    debug!("{:?}- Sent sender, starting recv listen", node);
     while let Some((id, message)) = bus_receiver.recv().await {
         //Send a state using change sender
-        debug!("Received message from node: {:?}", id);
+        debug!("{:?}- Received message from node: {:?}", node, id);
         if let Ok(()) = change_sender
             .send(super::StateChange::Receive((id, message)))
             .await
         {
-            debug!("Sent message to state handle");
+            debug!("{:?}- Sent message from {:?} to state handle", node, id);
         } else {
-            debug!("Failed to send message to state handle");
+            debug!("{:?}- Failed to send message to state handle {:?}", node, id);
             break;
         }
     }
@@ -34,6 +40,9 @@ DropStaleResponse(i, j, m) ==
 */
 fn drop_stale_response(server_state: &mut super::ServerState, message_term: Term) -> bool {
     if message_term < server_state.server_vars.current_term {
+        debug!(
+            "{:?}: Drop stale response from term {:?}",
+            server_state.node, message_term);
         return true;
     }
     false
@@ -55,6 +64,9 @@ fn update_term(server_state: &mut super::ServerState, message_term: Term) -> boo
         server_state.server_vars.current_term = message_term;
         server_state.server_vars.state = super::State::Follower;
         server_state.server_vars.voted_for = None;
+        debug!(
+            "{:?}: Update term to {:?}",
+            server_state.node, message_term);
         true
     } else {
         false

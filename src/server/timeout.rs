@@ -49,8 +49,8 @@ pub(super) struct ElectionTimer {
 }
 
 impl ElectionTimer {
-    const TIMEOUT_MIN: u64 = 150;
-    const VARIANCE: u64 = 150;
+    const TIMEOUT_MIN: u64 = 1500;
+    const VARIANCE: u64 = 1500;
     pub fn new(cs: mpsc::Sender<StateChange>) -> ElectionTimer {
         ElectionTimer { handle: None, cs }
     }
@@ -78,14 +78,14 @@ impl ElectionTimer {
 
     pub fn update_state(&mut self, server_state: &ServerState) {
         match server_state.server_vars.state {
-            State::Follower => {
+            State::Follower |  State::Candidate(_)  => {
                 if self.handle.is_none() {
                     debug!("{:?},{:?}: Updating timer state to start", server_state.server_vars.current_term, server_state.node);
                     let cs = self.cs.clone();
                     self.handle = Some(tokio::spawn(ElectionTimer::timeout_loop(server_state.node, server_state.server_vars.current_term,cs)));
                 }
             }
-            State::Leader(_) | State::Candidate(_) => {
+            State::Leader(_)=> {
                 if let Some(handle) = self.handle.take() {
                     debug!("{:?},{:?}: Updating timer state to stop",  server_state.server_vars.current_term,server_state.node);
                     handle.abort();

@@ -183,14 +183,17 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
-    use std::{thread::sleep, time::Duration};
+    use std::{net::Ipv4Addr, thread::sleep, time::Duration};
 
     use log::debug;
 
     use super::*;
     use crate::bus::TokioMulticastUdpBus;
 
-    fn init() {
+    fn init(server_id: ServerID) {
+        let port = 4000 + (server_id.0 as u16);
+        println!("Starting debug server {} on port {}", server_id.0, port);
+        console_subscriber::Builder::default().server_addr((Ipv4Addr::LOCALHOST, port)).build();
         let _ = env_logger::builder()
             //Format timestamp to include milliseconds
             .format_timestamp(Some(env_logger::TimestampPrecision::Millis))
@@ -209,8 +212,8 @@ mod tests {
             let handle = procspawn::spawn(
                 (server_id.clone(), server_ids.clone()),
                 |(server_id, server_ids): (ServerID, Vec<ServerID>)| {
+                    init(server_id);
                     debug!("Starting server {:?}", server_id);
-                    init();
                     //Tokio runtime create
                     let rt_out = tokio::runtime::Builder::new_multi_thread()
                         .enable_all()
